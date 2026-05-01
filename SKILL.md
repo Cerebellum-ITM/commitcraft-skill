@@ -1,6 +1,6 @@
 ---
 name: commitcraft
-description: Generate a structured git commit message via the CommitCraft CLI (Groq-powered). Use this skill whenever the user asks to commit work the assistant just produced — it stages the relevant files, picks the right tag/scope, runs the multi-stage AI pipeline, reviews the output for AI residue and re-runs the broken stage if needed, then promotes the draft to completed. The user still runs `git commit` themselves with the printed final_message.
+description: Generate a structured git commit message via the CommitCraft CLI (Groq-powered) and create the commit. Use this skill whenever the user asks to commit work the assistant just produced — it plans atomic commits per functionality, ensures CHANGELOG.md is updated by the assistant before generation, stages the relevant files, picks the right tag/scope, runs the multi-stage AI pipeline, reviews the output for AI residue and re-runs the broken stage if needed, promotes the draft to completed, and runs `git commit` itself. It never pushes.
 ---
 
 # CommitCraft skill
@@ -9,8 +9,50 @@ This skill drives the `commitcraft` CLI in headless mode (`commitcraft ai …`).
 The CLI runs a 3-stage AI pipeline (change-analyzer → commit body → commit
 title, plus an optional changelog refiner) against the staged diff and
 persists the result as a `draft` row in CommitCraft's local SQLite DB. The
-skill's job is to drive that CLI end-to-end without involving the user
-beyond the initial intent.
+skill's job is to drive that CLI end-to-end and create the actual git
+commit, without involving the user beyond the initial intent.
+
+## How I work — read this first
+
+Two non-negotiables that shape how every task ending in a commit must be
+planned and executed:
+
+### Atomic commits per functionality, planned up front
+
+Commits in this project are **atomic per functionality**. That decision
+is made during planning, not at the end. When laying out work that will
+end in a commit (or commits), identify up front the distinct
+functionalities / phases — each one is its own commit boundary.
+
+In practice, when a task naturally splits into several pieces (e.g.
+"add subcommand X" + "refactor helper Y" + "bump version"), plan to
+produce one commitcraft cycle per piece, in order, instead of staging
+everything together and producing a single mixed commit. If the task is
+truly one piece of work, one commit is correct.
+
+Usually all touched files belong to the same functionality and end up in
+the same commit, but unrelated edits (a stray typo fix, an unrelated
+config tweak) **must** be split into their own commit — never
+piggybacked. Stage only the files that belong to the current
+functionality, even when that means leaving other modified files in the
+working tree for the next cycle.
+
+### CHANGELOG.md is the assistant's responsibility
+
+If the project has a `CHANGELOG.md`, **the assistant must update it as
+part of the code changes for each functionality, before invoking
+commitcraft**. Add the entry under the appropriate section (Unreleased /
+current version) following the file's existing style.
+
+This is important: if the assistant does not update `CHANGELOG.md`,
+commitcraft's changelog stage will invent an entry from the diff, and
+that entry is often wrong, duplicated, or stylistically off. The right
+flow is: assistant writes the changelog entry → stages it with the rest
+of the functionality → commitcraft refines it. Treat `CHANGELOG.md` like
+any other source file the change requires.
+
+If the project does not have a `CHANGELOG.md`, skip this — commitcraft
+will not invent one.
 
 ## Prerequisites
 
@@ -35,17 +77,26 @@ git operations (push, rebase, etc).
 Follow these steps in order. Stop and report back to the user on any
 failure — don't paper over errors.
 
-### 1. Ensure the right files are staged
+### 1. Confirm the commit boundary and stage the right files
 
-The skill is responsible for `git add`-ing the files the assistant just
-modified in this session. Check `git status --short`:
+Before staging anything, decide what *this* commit covers. If the work
+done in the session spans multiple functionalities, this skill runs
+**once per functionality** — pick the first one and only stage its files
+now; the rest get their own cycles afterward.
 
-- If the files the assistant changed are already in the staged column
-  (`M `, `A `, `D ` in column 1), proceed.
+Make sure the `CHANGELOG.md` entry for this functionality has been
+written and is part of the files about to be staged (see the "How I
+work" section above). If the project has a changelog and the entry is
+missing, write it now before continuing.
+
+Then check `git status --short`:
+
+- If the files for this functionality are already in the staged column
+  (`M `, `A `, `D ` in column 1) and nothing unrelated is staged, proceed.
 - If they're only in the working-tree column (` M`, `??`), `git add` them
   explicitly by path. **Never** run `git add -A` or `git add .` — only
-  add what's relevant to the commit being requested. If you're unsure
-  which files belong, ask the user.
+  add what belongs to the current functionality. Unrelated modified
+  files stay in the working tree for the next cycle.
 - If `git diff --cached --quiet` succeeds (nothing staged), stop and tell
   the user there's nothing to commit.
 
@@ -192,26 +243,42 @@ commitcraft ai promote --id <ID>
 This flips the draft's status to `completed` in CommitCraft's DB. It
 does **not** execute `git commit` — that's intentional.
 
-### 8. Hand back
+### 8. Create the git commit
 
-Print to the user:
+Once the draft is promoted, **run `git commit` yourself** with the
+final message. Use a heredoc so the title and body are preserved
+verbatim (no escaping pitfalls):
 
-- The CommitCraft draft id.
-- The final commit message (verbatim, in a fenced block so they can copy
-  it).
-- The exact `git commit` invocation they should run, e.g.:
+```sh
+git commit -m "$(cat <<'EOF'
+<final_message verbatim>
+EOF
+)"
+```
 
-  ```sh
-  git commit -m "<title>" -m "<body>"
-  ```
+If the commit fails (pre-commit hook, etc.), surface the error and stop
+— do **not** retry with `--no-verify` and do **not** amend. Fix the
+underlying issue, re-stage if needed, and create a new commit.
 
-  Or, for a multi-line message, suggest a heredoc. Don't run `git commit`
-  yourself.
+Do **not** add `Co-Authored-By` trailers or any other automated
+signature unless the user explicitly asks for it.
+
+### 9. Hand back and continue
+
+Report briefly to the user:
+
+- The CommitCraft draft id and the resulting commit hash (`git rev-parse
+  --short HEAD`).
+- A one-line summary of what was committed.
+
+If there are remaining functionalities pending from the original plan
+(unstaged changes still in the working tree that belong to the next
+commit boundary), continue with the next cycle from step 1. When all
+planned commits are done, stop. **Never** push — that's the user's
+call.
 
 ## What this skill does NOT do
 
-- It does not run `git commit`. The user is the one who actually creates
-  the commit.
 - It does not push.
 - It does not reword existing commits — for that, use the TUI's reword
   flow (`commitcraft -w <hash>`).
@@ -239,6 +306,11 @@ commitcraft ai regenerate --id <id> --refresh-diff
 # 4. promote
 commitcraft ai promote --id <id>
 
-# 5. user runs
-git commit -m "..."
+# 5. assistant runs
+git commit -m "$(cat <<'EOF'
+<final_message>
+EOF
+)"
+
+# 6. if more functionalities remain, loop back to step 0 with the next subset
 ```
