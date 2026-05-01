@@ -265,11 +265,26 @@ signature unless the user explicitly asks for it.
 
 ### 9. Hand back and continue
 
-Report briefly to the user:
+Report to the user using **exactly** this two-line format, nothing else
+(no draft id, no extra prose, no bullets, no fences):
 
-- The CommitCraft draft id and the resulting commit hash (`git rev-parse
-  --short HEAD`).
-- A one-line summary of what was committed.
+```
+- Commit: <short_hash> <title line of final_message>
+- Resumen: <one-line description of what was committed>
+```
+
+The `<title line of final_message>` is the first line of the final
+message, including the `[TAG] scope:` prefix (e.g. `[DOC] contract:
+document blog composition and lifecycle`). The `Resumen:` line is the
+assistant's own one-sentence summary in Spanish — not a copy of the
+commit body.
+
+Example:
+
+```
+- Commit: f9e2d73 [DOC] contract: document blog composition and lifecycle
+- Resumen: Documenta cómo se compone un blog y su ciclo de vida en el contrato.
+```
 
 If there are remaining functionalities pending from the original plan
 (unstaged changes still in the working tree that belong to the next
