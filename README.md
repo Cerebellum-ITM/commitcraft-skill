@@ -1,6 +1,6 @@
 # commitcraft-skill
 
-A Claude Code skill that drives [CommitCraft](https://github.com/) in
+A [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills) that drives [CommitCraft](https://github.com/) in
 headless mode to produce structured `[TAG] scope: title` commit messages
 from the changes the assistant just made in a session.
 
