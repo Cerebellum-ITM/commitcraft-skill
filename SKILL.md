@@ -196,37 +196,62 @@ Read `final_message` and check for:
 - Mention-line duplication: the same `Updated CHANGELOG.md` line
   appearing twice.
 
-Decide which stage produced the issue:
+Decide whether to **patch** the draft directly or **re-run** the model:
 
-- Title problem (wrong scope, truncated, doesn't match body) → re-run
-  `--stage title`.
-- Body problem (residue, hallucinations, wrong tone) → re-run
-  `--stage body` (this also re-runs title and changelog).
-- Changelog mention/entry issue only → `--stage changelog`.
-- Multiple stages broken or summary itself looks bad → full
-  `regenerate` (no `--stage`).
+- **Patch directly with `ai edit`** when the text is almost right and
+  you already know exactly what should be there: typos, residual AI
+  phrasing to strip, a wrong tag/scope, a small tone tweak, or a
+  changelog entry that needs to be cleared. No Groq call, no quota
+  spend, telemetry from the original run is preserved.
+- **Re-run a stage with `ai regenerate --stage`** when you want the
+  model to *think again* about that stage: body has hallucinations or
+  wrong structure, title doesn't reflect the body, changelog stage
+  invented something off. Body re-runs also re-run title and changelog.
+- **Full `regenerate`** (no `--stage`) when multiple stages are broken
+  or the analyzer summary itself looks wrong.
+- **`regenerate --refresh-diff`** when the staged file set changed
+  after `generate`, or you see hallucinated version numbers / missing
+  files / stale references — those are usually a stale diff snapshot,
+  not a bad stage. Mutually exclusive with `--stage`; always implies a
+  full pipeline run because only the analyzer consumes the diff.
 
-Run:
+#### `ai edit` — direct patch
+
+```sh
+commitcraft ai edit --id <ID> [--title <s>] [--body <s>] \
+                              [--changelog <s>] [--tag <T>] [--scope <s>]
+```
+
+At least one flag besides `--id` is required. Each text flag accepts
+`-` to read from stdin (a single stdin read is shared if several flags
+use `-`). For `--changelog`, the literal `CLEAR` empties the field.
+The command recomposes `final_message` from the new title + body and
+preserves the previous `Changelog: …` trailer when applicable, then
+returns the same JSON shape as `ai show` / `ai regenerate`.
+
+Examples:
+
+```sh
+# Strip AI residue from the title
+commitcraft ai edit --id 42 --title "FIX: corregir parseo de branches"
+
+# Replace the body from stdin
+printf 'Refactor del parser para evitar prefijo `+ `.\n\nDetalle.' \
+  | commitcraft ai edit --id 42 --body -
+
+# Fix tag/scope without re-running stages
+commitcraft ai edit --id 42 --tag FIX --scope git
+
+# Drop a changelog entry that doesn't apply
+commitcraft ai edit --id 42 --changelog CLEAR
+```
+
+#### `ai regenerate` — re-run the pipeline
 
 ```sh
 commitcraft ai regenerate --id <ID> [--stage <body|title|changelog>]
-```
-
-If you need to re-include files that were staged **after** the original
-`generate` (or remove ones that were unstaged), pass `--refresh-diff`
-instead of `--stage`. That re-reads `git diff --cached` from the
-commit's workspace and persists the new snapshot before the pipeline
-runs. Use it whenever you hit hallucinated version numbers, missing
-files, or stale references — those are usually symptoms of a stale
-diff snapshot rather than a bad stage:
-
-```sh
 commitcraft ai regenerate --id <ID> --refresh-diff
 ```
-
-`--refresh-diff` and `--stage` are mutually exclusive — only the
-change analyzer consumes the diff, so refreshing it always implies a
-full pipeline run.
 
 Re-review the new output. Cap at **2** retries — if it's still wrong
 after that, stop and surface the latest `final_message` to the user with
@@ -314,8 +339,11 @@ commitcraft ai list-tags
 commitcraft ai generate -k "..." -k "..." -t <TAG> -s <scope>
 
 # 3. review → if needed
+#    a) small textual fix / wrong tag-scope / clear changelog: patch directly
+commitcraft ai edit --id <id> --title "..."           # or --body, --changelog, --tag, --scope
+#    b) make the model think again about a stage:
 commitcraft ai regenerate --id <id> --stage <body|title|changelog>
-# or, if more files were staged after step 2:
+#    c) staged file set changed after step 2:
 commitcraft ai regenerate --id <id> --refresh-diff
 
 # 4. promote
