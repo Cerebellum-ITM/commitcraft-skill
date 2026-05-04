@@ -103,8 +103,9 @@ Then check `git status --short`:
 ### 2. Pick the tag
 
 Run `commitcraft ai list-tags` and parse the JSON. The output is an array
-of `{tag, description, source}`. Pick the tag whose `description` best
-matches the nature of the staged diff:
+of `{tag, description, source}` with `source ∈ {"default", "global", "local"}`,
+listing only tags that are eligible for `generate --tag`. Pick the tag
+whose `description` best matches the nature of the staged diff:
 
 - New functionality → `ADD`.
 - Bug fix → `FIX`.
@@ -114,6 +115,26 @@ matches the nature of the staged diff:
 
 Bias toward `local`-source tags when they exist — those reflect the
 project's own taxonomy.
+
+If none of the tags returned by `list-tags` describes the change well,
+run `commitcraft ai list-addable-tags` to see the builtin tags the CLI
+knows about but that aren't yet registered in the local
+`.commitcraft.toml`. The output is an array of `{tag, description}`
+(independent of the local config's `behavior`). If one of those addable
+tags fits, register it first with:
+
+```sh
+commitcraft ai add-tag --tag <TAG>   # repeatable; -t shorthand
+```
+
+`add-tag` only accepts tags returned by `list-addable-tags` (or already
+local); anything else exits with `invalid_input`. It's idempotent and
+creates the local config from template if needed. After a successful
+`add-tag`, the tag will appear in `list-tags` with `source: "local"` and
+becomes valid for `generate --tag`.
+
+**Never** pass to `--tag` a value that isn't in `list-tags` (after any
+`add-tag` you ran).
 
 ### 3. Pick the scope
 
@@ -334,6 +355,8 @@ git add <paths the assistant changed>
 
 # 1. enumerate available tags
 commitcraft ai list-tags
+commitcraft ai list-addable-tags                      # builtin tags not yet in local config
+commitcraft ai add-tag --tag <TAG>                    # register an addable tag locally
 
 # 2. generate
 commitcraft ai generate -k "..." -k "..." -t <TAG> -s <scope>
