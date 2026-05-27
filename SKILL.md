@@ -506,13 +506,83 @@ be needed later:
 - Draft: <id>     ← optional, only when explicitly requested
 ```
 
+## Merge commits
+
+When the user asks to **merge a feature branch into main** (or another
+target branch), the workflow is different from the staged-diff flow
+above but uses the same CommitCraft surface. The schema is fixed by
+project convention:
+
+```
+[MERGE] <source-branch>: <AI-generated title>
+
+<AI-generated body summarizing the branch>
+```
+
+### When to invoke the merge flow
+
+- The user says "merge X into main", "haz el merge", "cierra esta
+  rama", or anything that means *merge a feature branch*.
+- The current branch is a feature branch and the user wants to land
+  it on `main` (or whichever target they name).
+
+Do **not** invoke this for fast-forward-only situations (the merge
+commit would be redundant), or when the user wants to rebase instead
+of merge.
+
+### Workflow
+
+The pre-flight context gate (step 1.5 in the staged-diff flow) is
+**not** applicable here — `ai merge` doesn't feed the diff through
+the change-analyzer model; it feeds the commit log through the
+release pipeline, which is sized differently.
+
+```sh
+# 1. Generate the merge draft from the branch's commit range.
+commitcraft ai merge --branch <source> [--into main]
+
+# 2. Verify the composed final_message (same gate, same rule set).
+commitcraft ai verify --id <id>
+
+# 3. Patch if needed — most common finding is title_too_long_soft
+#    because release-pipeline titles tend to run long.
+commitcraft ai edit --id <id> --title "..."
+
+# 4. Promote.
+commitcraft ai promote --id <id>
+
+# 5. Execute the actual git merge using the composed final_message.
+git checkout <target>            # usually `main`
+git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
+```
+
+### Notes on `ai merge` vs. `ai generate`
+
+- **No `--keypoint` flag**: merge messages derive content from the
+  branch's commits, which already encode the keypoints used at
+  commit time. If extra steering is needed, use `ai edit` after.
+- **`ai regenerate` does NOT yet support merge drafts**. It would
+  route the draft through the commit pipeline (wrong). For a clean
+  re-run, invoke `ai merge` again from scratch; for tweaks, use `ai edit`.
+- **No staging step**. The merge commit's content comes from the
+  branch's commit history, not the working tree. The branch can be
+  fully clean or have unrelated WIP — neither affects the draft.
+- **Title length warnings are common**. The release pipeline's title
+  prompt produces marketing-y titles that frequently exceed 72 chars.
+  Don't auto-`ai edit` them — sometimes a 90-char title is the right
+  call for a substantive branch. Use judgement.
+
 ## What this skill does NOT do
 
 - It does not push.
+- It does not execute `git merge` on its own initiative — the user
+  must explicitly request a merge for the merge flow to run.
 - It does not reword existing commits — for that, use the TUI's reword
   flow (`commitcraft -w <hash>`).
-- It does not handle release commits — those have a separate flow in
-  CommitCraft's TUI (release mode).
+- It does not handle release notes / GitHub releases — release notes
+  generation is still TUI-only as of today; a future `ai release`
+  subcommand will expose it headless, with publish (the `gh` step) as
+  a separate opt-in command.
 
 ## Cheat sheet
 
@@ -557,4 +627,12 @@ EOF
 # 7. recover keypoints after the fact (if needed)
 commitcraft ai show --id <draft_id>                   # JSON with keypoints[]
 commitcraft ai list                                   # recent drafts/commits
+
+# 8. merge a feature branch (different flow — see "Merge commits" section)
+commitcraft ai merge --branch <source> --into main    # generates [MERGE] draft
+commitcraft ai verify --id <id>                       # same gate
+commitcraft ai edit --id <id> --title "..."           # if title is too long
+commitcraft ai promote --id <id>
+git checkout main
+git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
 ```
