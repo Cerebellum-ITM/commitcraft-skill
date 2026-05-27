@@ -572,17 +572,83 @@ git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_me
   Don't auto-`ai edit` them — sometimes a 90-char title is the right
   call for a substantive branch. Use judgement.
 
+## Release notes
+
+When the user asks to **draft release notes** for a version (typically
+right before tagging and publishing on GitHub), use the release flow.
+Like the merge flow, it doesn't touch the staged tree or the
+change-analyzer model — it summarizes a range of commits through the
+same release pipeline.
+
+### When to invoke the release flow
+
+- The user says "draft the release notes", "release v1.2.3", "haz
+  el release", "saca las notas de la versión", or anything that means
+  *prepare the GH release body text*.
+- Typically run right after merging to `main` and before tagging.
+
+Do **not** invoke this for a normal commit, a merge, or a hotfix
+where the user just wants a tag without notes.
+
+### Workflow
+
+```sh
+# 1. Draft the release notes. --from defaults to the most recent tag,
+#    --to defaults to HEAD. --version is required.
+commitcraft ai release --version v1.2.3
+
+# 2. Verify (same gate; title_too_long_soft is common — release-pipeline
+#    titles run long).
+commitcraft ai verify --id <id>
+
+# 3. Trim or rephrase manually if needed. The body often includes
+#    every commit in the range; the user may want to drop noisy ones
+#    (typo fixes, internal refactors that don't matter externally).
+commitcraft ai edit --id <id> --body -    # paste new body via stdin
+
+# 4. Promote.
+commitcraft ai promote --id <id>
+
+# 5. Hand the title + body to the user (or to a future
+#    `commitcraft ai release publish` once that lands). For now,
+#    extracting the body from the JSON:
+commitcraft ai show --id <id> | jq -r .body
+
+# 6. The user runs `gh release create` themselves (or you do it
+#    with explicit authorization from them).
+```
+
+### Notes on `ai release` vs. `ai merge`
+
+- **Required `--version`**. Release notes are versioned by definition;
+  if the user hasn't picked a version, push back before running.
+- **Default range**: `--from` is the most recent tag, `--to` is HEAD.
+  Override either when drafting notes for a non-linear cut (e.g. a
+  hotfix branch off an old tag).
+- **No `git commit`**. The artifact is GH release-body text, not a
+  commit message. The skill stops at promote; the user (or a future
+  publish subcommand) drives `gh release create`.
+- **Storage divergence from TUI**: the TUI's release mode writes to
+  a separate `releases` table; `ai release` writes to `commits`
+  (with `type=RELEASE`). The two surfaces don't see each other's
+  drafts today. If the user expected to see a TUI-drafted release
+  in `ai list`, that's why.
+- **Publish is intentionally separate**. The skill never runs
+  `gh release create` on its own — that's a public, mostly
+  irreversible action. The user authorizes it explicitly.
+
 ## What this skill does NOT do
 
 - It does not push.
-- It does not execute `git merge` on its own initiative — the user
-  must explicitly request a merge for the merge flow to run.
+- It does not execute `git merge` or `git tag` on its own initiative —
+  the user must explicitly request the operation for the corresponding
+  flow to run.
 - It does not reword existing commits — for that, use the TUI's reword
   flow (`commitcraft -w <hash>`).
-- It does not handle release notes / GitHub releases — release notes
-  generation is still TUI-only as of today; a future `ai release`
-  subcommand will expose it headless, with publish (the `gh` step) as
-  a separate opt-in command.
+- It does not publish to GitHub. `ai release` drafts notes but never
+  calls `gh`; the publish step (`gh release create` + tag push + asset
+  upload) is the user's decision, until a separate
+  `ai release publish` subcommand lands.
 
 ## Cheat sheet
 
@@ -635,4 +701,11 @@ commitcraft ai edit --id <id> --title "..."           # if title is too long
 commitcraft ai promote --id <id>
 git checkout main
 git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
+
+# 9. draft release notes for a version (see "Release notes" section)
+commitcraft ai release --version v1.2.3               # defaults: --from=last-tag --to=HEAD
+commitcraft ai verify --id <id>
+commitcraft ai edit --id <id> --body -                # trim verbose body via stdin
+commitcraft ai promote --id <id>
+commitcraft ai show --id <id> | jq -r .body           # hand off body text to user
 ```
