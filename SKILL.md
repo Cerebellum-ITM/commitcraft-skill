@@ -54,6 +54,58 @@ any other source file the change requires.
 If the project does not have a `CHANGELOG.md`, skip this — commitcraft
 will not invent one.
 
+### Preferred invocation: delegate to a sub-agent
+
+This skill does mechanical work — parse JSON, follow a checklist, run
+CLI commands, decide between `ai edit` and `ai regenerate` based on
+clear rules. It does **not** need the parent agent's reasoning depth,
+and running it inline drags every staged diff and `final_message` into
+the parent's context window (which is the same context that just held
+the code changes — exactly what we don't want to bloat).
+
+When the parent agent is the one that just produced the code (the
+normal case), it should **delegate this skill to a sub-agent** instead
+of running it inline. The sub-agent receives the keypoints as part of
+its prompt, executes the whole pipeline, makes any corrections needed,
+and returns only the commit hash + title to the parent.
+
+```
+Agent(
+  subagent_type: "general-purpose",
+  model: "haiku",
+  description: "Commit current changes",
+  prompt: """
+    Run the commitcraft skill end-to-end for the staged tree.
+
+    Keypoints (use verbatim, do not paraphrase):
+    - <keypoint 1>
+    - <keypoint 2>
+    - ...
+
+    Functionality covered by this commit: <one line>
+    Files in scope (already staged): <list>
+
+    If `commitcraft ai context --strict` exits non-zero, stop and
+    report — do not proceed with a payload that overflows the model.
+    If `final_message` has AI residue, hallucinated paths, or wrong
+    language, fix with `ai edit` or `ai regenerate` (cap 2 retries —
+    you have full freedom to read the staged diff).
+
+    Report back ONLY: <commit_hash> <title line of final_message>.
+  """
+)
+```
+
+Why Haiku: the work is rule-driven, not creative. Haiku costs ~10×
+less per token than Opus and keeps the parent's context clean. If
+Haiku gets confused in a corner case (rare with a tight prompt and the
+`ai context` gate in place), escalate to Sonnet — still cheaper than
+Opus.
+
+**When NOT to delegate**: when the user is driving the skill directly
+(invoked `/commitcraft`, asked "commitea esto" in a fresh session, or
+otherwise has no parent context to protect), running inline is fine.
+
 ## Prerequisites
 
 The skill assumes `commitcraft` is on `$PATH`. If `command -v commitcraft`
@@ -99,6 +151,43 @@ Then check `git status --short`:
   files stay in the working tree for the next cycle.
 - If `git diff --cached --quiet` succeeds (nothing staged), stop and tell
   the user there's nothing to commit.
+
+### 1.5. Pre-flight context check
+
+Before spending any Groq quota, verify the staged diff actually fits
+inside the change-analyzer model's context window:
+
+```sh
+commitcraft ai context --strict
+```
+
+This is offline — no Groq call, no DB write. It rebuilds the exact
+payload `ai generate` would send (system prompt + `DEVELOPER_POINTS:` +
+the same 80 KB-capped diff) and compares the chars/4 token estimate to
+the model's cached `context_window`.
+
+Exit codes and decision tree:
+
+- **Exit 0**, `fits: true`, `diff_truncated: false` → proceed to step 2.
+- **Exit 0**, `fits: true`, `diff_truncated: true` → the diff was
+  capped by `ChangeAnalyzerMaxDiffSize` before reaching the model.
+  Stage 1 will see a partial diff and lean heavily on the keypoints.
+  Either split the commit further (preferred — atomic-commits
+  principle) or strengthen the keypoints (step 4) so the analyzer
+  doesn't extrapolate the missing parts.
+- **Exit 3**, `fits: false` → stop. The payload overflows the model
+  even before truncation. **Do not proceed** with `ai generate` — that
+  is the primary source of hallucinations. Report to the user and
+  propose splitting the staged set into smaller atomic commits. Re-run
+  this skill from step 1 with the reduced staging.
+- **Exit 0**, `fits: null`, `context_window: 0` → the configured model
+  (`Prompts.ChangeAnalyzerPromptModel`) is not in the local
+  `groq_models_cache`. The gate is advisory only; proceed but mention
+  to the user that the context window is unknown. The cache is
+  populated by the TUI's model picker — running `commitcraft` once
+  refreshes it.
+- **Exit 1** with `no_staged_diff` → step 1 was misjudged; re-check
+  `git status` and stage.
 
 ### 2. Pick the tag
 
@@ -168,20 +257,41 @@ Examples (good vs. bad):
 
 ### 4. Build the keypoints
 
-The keypoints are the most relevant facts about the change, **concise**
-(short noun phrases or single sentences, not paragraphs), in **Spanish**.
-Each keypoint should be something a reviewer wouldn't immediately see
-from the diff alone — *what* was done at the conceptual level, not the
-file-by-file inventory.
+The keypoints are the bridge between the assistant's session memory
+and CommitCraft's AI pipeline. They are the **only** way the
+non-obvious *intent* behind the diff reaches the model — without them,
+stage 1 has to infer everything from the raw diff, which is exactly
+where hallucinations originate.
 
-Good: `"Subcomando ai promote"`, `"Bump v0.35.1 -> v0.36.0"`.
+Rules:
 
-Bad: `"Se agregó un nuevo archivo internal/cli/ai/promote.go que
-implementa el subcomando promote para que el usuario pueda marcar un
-draft como completado en la base de datos"`.
+1. **Concise but informative.** Short noun phrases or single
+   sentences, not paragraphs. In **Spanish**.
+2. **Each keypoint must name something concrete** — a symbol,
+   filename, flag, decision, or version bump. A keypoint that could
+   apply to "any commit in this repo" is useless.
+3. **Cover the *why*, not the *what***. The diff already shows what
+   changed. Keypoints should add the reasoning, the trade-off picked,
+   or the link between pieces that the diff can't show.
+4. **3–6 keypoints**. Fewer and the model has nothing to anchor on;
+   more and the signal gets diluted.
 
-Aim for 3–6 keypoints. Use the assistant's own memory of what it just did
-in the session — that's what they're for.
+Good (each names a concrete artifact + decision):
+
+- `"Nuevo subcomando ai promote para marcar drafts como completed"`
+- `"Bump v0.35.1 -> v0.36.0 (minor: subcomando user-visible)"`
+- `"add-tag valida contra list-addable-tags para evitar tags inventados"`
+
+Bad (vague or pure description of the diff):
+
+- `"Se agregó un nuevo archivo internal/cli/ai/promote.go que
+  implementa el subcomando promote para que el usuario pueda marcar un
+  draft como completado en la base de datos"` (paragraph, not keypoint)
+- `"Cambios en el CLI"` (says nothing)
+- `"Refactor"` (says nothing)
+
+Use the assistant's own memory of what it just did — that's the
+unique value the agent brings that the diff cannot reproduce.
 
 ### 5. Generate
 
@@ -338,6 +448,29 @@ commit boundary), continue with the next cycle from step 1. When all
 planned commits are done, stop. **Never** push — that's the user's
 call.
 
+### Recovering the keypoints after the commit
+
+The keypoints used for a commit are persisted in CommitCraft's local
+SQLite (the same row the draft lived in, now `status: "completed"`).
+If the user asks "what keypoints were used for commit X?", recover
+them with:
+
+```sh
+commitcraft ai show --id <draft_id>   # returns JSON with `keypoints` field
+commitcraft ai list                    # enumerates recent drafts/commits
+```
+
+The `draft_id` is the `id` returned by `ai generate` and printed in
+step 5 — it stays valid after `promote`. When invoking via sub-agent,
+include the draft id in the report back to the parent if recovery may
+be needed later:
+
+```
+- Commit: <short_hash> <title>
+- Resumen: <one-line summary>
+- Draft: <id>     ← optional, only when explicitly requested
+```
+
 ## What this skill does NOT do
 
 - It does not push.
@@ -352,6 +485,9 @@ call.
 # 0. ensure right files are staged
 git status --short
 git add <paths the assistant changed>
+
+# 0.5. pre-flight context gate (offline, no Groq call)
+commitcraft ai context --strict                       # exit 3 if fits=false
 
 # 1. enumerate available tags
 commitcraft ai list-tags
@@ -379,4 +515,8 @@ EOF
 )"
 
 # 6. if more functionalities remain, loop back to step 0 with the next subset
+
+# 7. recover keypoints after the fact (if needed)
+commitcraft ai show --id <draft_id>                   # JSON with keypoints[]
+commitcraft ai list                                   # recent drafts/commits
 ```
