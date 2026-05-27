@@ -314,18 +314,53 @@ fields. If the command exits non-zero, parse the stderr JSON
 
 ### 6. Review the output
 
+Step 6 runs in two layers: a **deterministic gate** that catches the
+mechanical defects, and a **semantic review** for the judgements the
+gate cannot make.
+
+#### 6a. Deterministic gate — `ai verify`
+
+```sh
+commitcraft ai verify --id <ID>
+```
+
+This is offline, no Groq call, no DB write. The verifier checks the
+composed `final_message` against eleven rules and emits a JSON
+`VerifyReport`. Exit codes:
+
+- **0** — clean (or warnings only). Move on to 6b.
+- **4** — at least one error finding. Each finding has a `rule` slug
+  + `severity` + `message` + `location`. Use the rule to decide:
+  - `ai_residue_phrase`, `template_placeholder`, `code_fence_wrapper`,
+    `title_format_missing_tag`, `empty_title`, `title_equals_body`,
+    `title_too_long_hard` → patch with `ai edit` (the right text is
+    knowable from the diff + keypoints; no need to re-run the model).
+  - Multiple rules failing at once → consider `ai regenerate --stage
+    title` or full `regenerate` instead of patching field by field.
+- Warnings (`title_format_missing_scope`, `title_too_long_soft`,
+  `empty_body`, `duplicate_line_in_body`) don't block the commit by
+  default. Decide per case — duplicate `Updated CHANGELOG.md` lines
+  warrant an `ai edit --changelog CLEAR` + manual body edit; a 75-char
+  title in a body-heavy commit is usually fine.
+
+After any `ai edit` / `regenerate`, re-run `ai verify` to confirm
+the gate now passes.
+
+#### 6b. Semantic review — judgements `ai verify` cannot make
+
 Read `final_message` and check for:
 
-- AI residue: phrases like "I made the following changes", "Here is the
-  commit message", "PARAGRAPH 1", literal stage labels, code-fence wrappers.
-- Truncation: title that's clearly cut off mid-word, or a body that
-  refers to bullets the body doesn't have.
-- Hallucinated paths/symbols: file or function names that aren't in the
-  staged diff.
-- Wrong language: title in Spanish when the project's body is English
-  (or vice versa, depending on the project's convention).
-- Mention-line duplication: the same `Updated CHANGELOG.md` line
-  appearing twice.
+- **Truncation**: title cut off mid-word, body referring to bullets
+  that don't exist, sentences ending in "...".
+- **Hallucinated paths/symbols**: file or function names that aren't
+  in the staged diff. Cross-check against `git diff --cached --name-only`.
+- **Wrong language**: title in Spanish when the project's body is
+  English (or vice versa). The verifier doesn't classify language.
+- **Misframed intent**: the title is technically valid but describes
+  a different change than the keypoints asked for.
+
+These four are the ones a reviewer's intuition still beats heuristics
+on. The `ai verify` gate frees up your attention for exactly these.
 
 Decide whether to **patch** the draft directly or **re-run** the model:
 
@@ -496,6 +531,9 @@ commitcraft ai add-tag --tag <TAG>                    # register an addable tag 
 
 # 2. generate
 commitcraft ai generate -k "..." -k "..." -t <TAG> -s <scope>
+
+# 2.5. deterministic gate on final_message
+commitcraft ai verify --id <id>                       # exit 4 if errors
 
 # 3. review → if needed
 #    a) small textual fix / wrong tag-scope / clear changelog: patch directly
