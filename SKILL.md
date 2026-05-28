@@ -454,6 +454,26 @@ underlying issue, re-stage if needed, and create a new commit.
 Do **not** add `Co-Authored-By` trailers or any other automated
 signature unless the user explicitly asks for it.
 
+### 8.5. Link the draft to the git commit
+
+Right after `git commit` succeeds, capture the new commit's hash and
+write it onto the draft so future `commitcraft ai show --commit <hash>`
+lookups can recover this commit's keypoints, summary, and per-stage
+telemetry by git hash alone — no need to remember the draft id later.
+
+```sh
+commitcraft ai link-commit --id <draft_id> --hash "$(git rev-parse HEAD)"
+```
+
+Best-effort: if `ai link-commit` exits non-zero, surface a one-line
+warning to the user but **do not** roll back the commit — the commit
+itself is good; the link is metadata. The user can re-run
+`ai link-commit` manually later if recovery matters.
+
+When invoking via sub-agent, the linking step is the sub-agent's
+responsibility — the parent never sees the draft id, so the link must
+happen before the sub-agent reports back.
+
 ### 9. Hand back and continue
 
 Report to the user using **exactly** this two-line format, nothing else
@@ -485,26 +505,33 @@ call.
 
 ### Recovering the keypoints after the commit
 
-The keypoints used for a commit are persisted in CommitCraft's local
-SQLite (the same row the draft lived in, now `status: "completed"`).
-If the user asks "what keypoints were used for commit X?", recover
-them with:
+When step 8.5 ran (the standard flow), the draft is linked to the
+commit's git hash. Then the user can recover the keypoints, the
+analyzer summary, and the per-stage telemetry by git hash alone —
+no need to remember the draft id:
 
 ```sh
-commitcraft ai show --id <draft_id>   # returns JSON with `keypoints` field
-commitcraft ai list                    # enumerates recent drafts/commits
+commitcraft ai show --commit <hash>   # short or full hash; ≥4 chars
 ```
 
-The `draft_id` is the `id` returned by `ai generate` and printed in
-step 5 — it stays valid after `promote`. When invoking via sub-agent,
-include the draft id in the report back to the parent if recovery may
-be needed later:
+The hash is what's already visible in `git log`, so this is the
+primary recovery path going forward. Returns the full JSON envelope
+(`keypoints`, `summary`, `body`, `title`, `stages`, etc.).
 
+Fallback paths when linking didn't happen (legacy commits made before
+step 8.5 existed, or commits where `ai link-commit` failed and was
+never retried):
+
+```sh
+commitcraft ai show --id <draft_id>     # if you remember the id
+commitcraft ai list -status completed   # search by title_snippet
 ```
-- Commit: <short_hash> <title>
-- Resumen: <one-line summary>
-- Draft: <id>     ← optional, only when explicitly requested
-```
+
+Old drafts (pre-migration) have `commit_hash` absent from their JSON
+envelope (the `omitempty` field is just not emitted). If the user
+wants to retroactively link an old draft, they can run
+`ai link-commit --id <old> --hash <git>` once and the recovery
+becomes `ai show --commit <hash>` from then on.
 
 ## Merge commits
 
@@ -688,11 +715,15 @@ git commit -m "$(cat <<'EOF'
 EOF
 )"
 
+# 5.5. link the draft to the new commit (best-effort)
+commitcraft ai link-commit --id <id> --hash "$(git rev-parse HEAD)"
+
 # 6. if more functionalities remain, loop back to step 0 with the next subset
 
-# 7. recover keypoints after the fact (if needed)
-commitcraft ai show --id <draft_id>                   # JSON with keypoints[]
-commitcraft ai list                                   # recent drafts/commits
+# 7. recover keypoints after the fact (preferred path: by git hash)
+commitcraft ai show --commit <hash>                   # short or full hash
+commitcraft ai show --id <draft_id>                   # fallback if unlinked
+commitcraft ai list                                   # search by title_snippet
 
 # 8. merge a feature branch (different flow — see "Merge commits" section)
 commitcraft ai merge --branch <source> --into main    # generates [MERGE] draft
@@ -701,6 +732,7 @@ commitcraft ai edit --id <id> --title "..."           # if title is too long
 commitcraft ai promote --id <id>
 git checkout main
 git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
+commitcraft ai link-commit --id <id> --hash "$(git rev-parse HEAD)"
 
 # 9. draft release notes for a version (see "Release notes" section)
 commitcraft ai release --version v1.2.3               # defaults: --from=last-tag --to=HEAD
