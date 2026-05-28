@@ -565,22 +565,24 @@ the change-analyzer model; it feeds the commit log through the
 release pipeline, which is sized differently.
 
 ```sh
-# 1. Generate the merge draft from the branch's commit range.
+# 1. Generate the merge draft. The returned JSON has `"kind": "release"` — persist it.
 commitcraft ai merge --branch <source> [--into main]
 
-# 2. Verify the composed final_message (same gate, same rule set).
-commitcraft ai verify --id <id>
+# 2. Verify. ALWAYS pass --kind release for merge/release drafts.
+commitcraft ai verify --id <id> --kind release
 
-# 3. Patch if needed — most common finding is title_too_long_soft
-#    because release-pipeline titles tend to run long.
-commitcraft ai edit --id <id> --title "..."
+# 3. Patch if needed — most common finding is title_too_long_soft.
+commitcraft ai edit --id <id> --kind release --title "..."
 
 # 4. Promote.
-commitcraft ai promote --id <id>
+commitcraft ai promote --id <id> --kind release
 
 # 5. Execute the actual git merge using the composed final_message.
 git checkout <target>            # usually `main`
-git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
+git merge --no-ff <source> -m "$(commitcraft ai show --id <id> --kind release | jq -r .final_message)"
+
+# 6. Link the resulting merge commit to the release row.
+commitcraft ai link-commit --id <id> --kind release --hash "$(git rev-parse HEAD)"
 ```
 
 ### Notes on `ai merge` vs. `ai generate`
@@ -598,6 +600,13 @@ git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_me
   prompt produces marketing-y titles that frequently exceed 72 chars.
   Don't auto-`ai edit` them — sometimes a 90-char title is the right
   call for a substantive branch. Use judgement.
+- **Pass `--kind release` to every follow-up call.** Merge drafts
+  live in the `releases` table (alongside RELEASE drafts), not in
+  `commits`. The id you get back from `ai merge` may collide with a
+  `commits` id; explicit `--kind release` on `ai show / edit /
+  verify / promote / link-commit` keeps the lookup deterministic.
+  The `kind` field in the returned JSON is what to persist and pass
+  back.
 
 ## Release notes
 
@@ -620,26 +629,23 @@ where the user just wants a tag without notes.
 ### Workflow
 
 ```sh
-# 1. Draft the release notes. --from defaults to the most recent tag,
-#    --to defaults to HEAD. --version is required.
+# 1. Draft the release notes. --version is required; --from defaults to the most recent tag,
+#    --to defaults to HEAD. The returned JSON has `"kind": "release"` — persist it.
 commitcraft ai release --version v1.2.3
 
-# 2. Verify (same gate; title_too_long_soft is common — release-pipeline
-#    titles run long).
-commitcraft ai verify --id <id>
+# 2. Verify. ALWAYS pass --kind release.
+commitcraft ai verify --id <id> --kind release
 
 # 3. Trim or rephrase manually if needed. The body often includes
-#    every commit in the range; the user may want to drop noisy ones
-#    (typo fixes, internal refactors that don't matter externally).
-commitcraft ai edit --id <id> --body -    # paste new body via stdin
+#    every commit in the range; the user may want to drop noisy ones.
+commitcraft ai edit --id <id> --kind release --body -
 
 # 4. Promote.
-commitcraft ai promote --id <id>
+commitcraft ai promote --id <id> --kind release
 
 # 5. Hand the title + body to the user (or to a future
-#    `commitcraft ai release publish` once that lands). For now,
-#    extracting the body from the JSON:
-commitcraft ai show --id <id> | jq -r .body
+#    `commitcraft ai release publish` once that lands).
+commitcraft ai show --id <id> --kind release | jq -r .body
 
 # 6. The user runs `gh release create` themselves (or you do it
 #    with explicit authorization from them).
@@ -655,11 +661,16 @@ commitcraft ai show --id <id> | jq -r .body
 - **No `git commit`**. The artifact is GH release-body text, not a
   commit message. The skill stops at promote; the user (or a future
   publish subcommand) drives `gh release create`.
-- **Storage divergence from TUI**: the TUI's release mode writes to
-  a separate `releases` table; `ai release` writes to `commits`
-  (with `type=RELEASE`). The two surfaces don't see each other's
-  drafts today. If the user expected to see a TUI-drafted release
-  in `ai list`, that's why.
+- **Shared storage with the TUI**: both surfaces write to the
+  `releases` table. A draft created via `ai release` appears in the
+  TUI's Releases view (and vice versa). The source column tracks
+  whether the row came from `tui` or `ai`.
+- **Always pass `--kind release`** to `ai show / edit / verify /
+  promote / link-commit` for these drafts. `releases` and `commits`
+  ids can collide (each table has its own auto-increment); without
+  `--kind`, the auto-probe favors commits and you might mutate the
+  wrong row. The `kind` is always present in the JSON returned by
+  `ai release` / `ai merge` — persist it and pass it back.
 - **Publish is intentionally separate**. The skill never runs
   `gh release create` on its own — that's a public, mostly
   irreversible action. The user authorizes it explicitly.
@@ -725,19 +736,19 @@ commitcraft ai show --commit <hash>                   # short or full hash
 commitcraft ai show --id <draft_id>                   # fallback if unlinked
 commitcraft ai list                                   # search by title_snippet
 
-# 8. merge a feature branch (different flow — see "Merge commits" section)
-commitcraft ai merge --branch <source> --into main    # generates [MERGE] draft
-commitcraft ai verify --id <id>                       # same gate
-commitcraft ai edit --id <id> --title "..."           # if title is too long
-commitcraft ai promote --id <id>
+# 8. merge a feature branch (kind=release, always pass --kind release)
+commitcraft ai merge --branch <source> --into main    # writes to releases table; JSON kind=release
+commitcraft ai verify --id <id> --kind release
+commitcraft ai edit --id <id> --kind release --title "..."
+commitcraft ai promote --id <id> --kind release
 git checkout main
-git merge --no-ff <source> -m "$(commitcraft ai show --id <id> | jq -r .final_message)"
-commitcraft ai link-commit --id <id> --hash "$(git rev-parse HEAD)"
+git merge --no-ff <source> -m "$(commitcraft ai show --id <id> --kind release | jq -r .final_message)"
+commitcraft ai link-commit --id <id> --kind release --hash "$(git rev-parse HEAD)"
 
-# 9. draft release notes for a version (see "Release notes" section)
+# 9. draft release notes (kind=release, same --kind release everywhere)
 commitcraft ai release --version v1.2.3               # defaults: --from=last-tag --to=HEAD
-commitcraft ai verify --id <id>
-commitcraft ai edit --id <id> --body -                # trim verbose body via stdin
-commitcraft ai promote --id <id>
-commitcraft ai show --id <id> | jq -r .body           # hand off body text to user
+commitcraft ai verify --id <id> --kind release
+commitcraft ai edit --id <id> --kind release --body -
+commitcraft ai promote --id <id> --kind release
+commitcraft ai show --id <id> --kind release | jq -r .body
 ```
