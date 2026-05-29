@@ -113,6 +113,13 @@ fails, stop and tell the user to install it (see `README.md` in this repo).
 A `GROQ_API_KEY` must be configured in `~/.config/CommitCraft/.env` — when
 the API call fails with an auth error, surface it verbatim and stop.
 
+CommitCraft supports **two Groq API key slots** (`user` and `ai`) with one
+active at a time, so a free-tier rate limit on one key can be sidestepped
+by swapping to the other without losing commit consistency (same models,
+fresh per-model quota). The skill leans on this in the rate-limit
+escalation below — see step 5.5. Inspect the slots with
+`commitcraft ai key show` (JSON, no secrets).
+
 ## When to invoke
 
 - The assistant just made code changes in this session and the user says
@@ -310,7 +317,46 @@ fields. If the command exits non-zero, parse the stderr JSON
 
 - `no_staged_diff` → step 1 was misjudged; re-check status.
 - `invalid_input` with "unknown tag" → step 2 was wrong; re-pick.
-- `api_error` → Groq call failed; show the message verbatim.
+- `rate_limited` → the active key's per-model Groq quota is exhausted.
+  Go to step 5.5 (key-swap escalation) instead of retrying blindly.
+- `api_error` → Groq call failed for some other reason; show the
+  message verbatim.
+
+### 5.5. Rate limits — swap the key slot, don't hammer
+
+This applies to **every** `commitcraft ai` call that runs the model
+(`generate`, `regenerate`, `merge`, `release`). When a call returns
+`{"code": "rate_limited"}` on stderr (Groq HTTP 429), the active key's
+quota **for that stage's model** is spent. Do **not** re-run the same
+command in a loop — that just burns through what little quota is left
+and produces the "20 calls and still failing" pattern. Escalate
+deterministically:
+
+1. **Swap to the other key slot** (same models, fresh per-model quota →
+   commit consistency is preserved):
+
+   ```sh
+   commitcraft ai key swap
+   ```
+
+   - If swap succeeds, **retry the exact same command once**.
+   - If swap exits with `{"code": "empty_slot"}`, only one key is
+     configured — there's nothing to swap to. Skip to step 3.
+
+2. If the retry **also** returns `rate_limited`, both slots' quota for
+   that model is exhausted. **Stop swapping** — do not ping-pong
+   between slots (cap: one swap per stuck call).
+
+3. **Surface to the user and stop.** Report which slot(s) are rate-limited
+   and that the quota window needs to reset, or that they can register an
+   additional key with `commitcraft ai key set --slot <user|ai>`. Do
+   **not** switch the stage's model to dodge the limit — model changes
+   are out of scope here (they cost commit consistency); key-swap is the
+   only sanctioned rate-limit escape.
+
+Note: this is purely a **rate-limit** path. A model call that *succeeds*
+but produces a bad title/body is a quality issue — handle it in step 6
+with `ai edit` (no Groq call) or a bounded `ai regenerate`, not here.
 
 ### 6. Review the output
 
@@ -705,6 +751,10 @@ commitcraft ai add-tag --tag <TAG>                    # register an addable tag 
 
 # 2. generate
 commitcraft ai generate -k "..." -k "..." -t <TAG> -s <scope>
+
+# 2.1. on {"code":"rate_limited"} (HTTP 429): swap key slot, retry ONCE, don't loop
+commitcraft ai key show                               # which slots are set + active
+commitcraft ai key swap                               # → other slot; empty_slot if none. Then re-run the failed command.
 
 # 2.5. deterministic gate on final_message
 commitcraft ai verify --id <id>                       # exit 4 if errors
