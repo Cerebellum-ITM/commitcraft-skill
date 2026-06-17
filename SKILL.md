@@ -12,6 +12,12 @@ persists the result as a `draft` row in CommitCraft's local SQLite DB. The
 skill's job is to drive that CLI end-to-end and create the actual git
 commit, without involving the user beyond the initial intent.
 
+In **delegate mode** (`[agent] mode = "delegate"` in the config, or the
+`--agent` flag) the CLI skips Groq entirely: it emits a prompt bundle for you
+to fulfill, and you return the message via `commitcraft ai submit`. See
+**§ Delegate mode** — the rest of the flow (verify → promote → git commit) is
+unchanged.
+
 ## How I work — read this first
 
 Two non-negotiables that shape how every task ending in a commit must be
@@ -274,6 +280,16 @@ Rules:
 
 1. **Concise but informative.** Short noun phrases or single
    sentences, not paragraphs. In **Spanish**.
+
+   > ⚠️ **The keypoints are in Spanish, but the generated commit
+   > message (title + body) is ALWAYS in English.** CommitCraft's
+   > prompts are written in English and the pipeline already returns an
+   > English message regardless of the keypoint language. Do **not**
+   > "fix" an English commit back to Spanish just because the keypoints
+   > you fed it were Spanish — that is the single most common mistake.
+   > The keypoint language and the commit-output language are
+   > independent: keypoints = Spanish, commit = English, always. (Only
+   > the `CHANGELOG.md` and the chat `Resumen:` line stay Spanish.)
 2. **Each keypoint must name something concrete** — a symbol,
    filename, flag, decision, or version bump. A keypoint that could
    apply to "any commit in this repo" is useless.
@@ -321,6 +337,13 @@ fields. If the command exits non-zero, parse the stderr JSON
   Go to step 5.5 (key-swap escalation) instead of retrying blindly.
 - `api_error` → Groq call failed for some other reason; show the
   message verbatim.
+
+**Delegate mode branch.** If the JSON on stdout has `"mode": "delegate"`
+(instead of a draft `id` + `status`), the CLI did **not** call Groq — it
+handed you a prompt bundle to fulfill yourself. Do not treat it as a draft.
+Jump to **§ Delegate mode** and produce the message + `ai submit`, then come
+back to step 6. This happens whenever `[agent] mode = "delegate"` is set in
+the global config, or you passed `--agent`.
 
 ### 5.5. Rate limits — swap the key slot, don't hammer
 
@@ -400,8 +423,12 @@ Read `final_message` and check for:
   that don't exist, sentences ending in "...".
 - **Hallucinated paths/symbols**: file or function names that aren't
   in the staged diff. Cross-check against `git diff --cached --name-only`.
-- **Wrong language**: title in Spanish when the project's body is
-  English (or vice versa). The verifier doesn't classify language.
+- **Wrong language**: the commit message (title **and** body) must be
+  in **English**. The verifier doesn't classify language, so this is on
+  you. If any part came out in Spanish, fix it to English with `ai
+  edit`. Do **not** do the reverse — never rewrite an English commit to
+  Spanish because the keypoints were Spanish; keypoints are Spanish *by
+  design* and have nothing to do with the output language.
 - **Misframed intent**: the title is technically valid but describes
   a different change than the keypoints asked for.
 
@@ -721,6 +748,117 @@ commitcraft ai show --id <id> --kind release | jq -r .body
   `gh release create` on its own — that's a public, mostly
   irreversible action. The user authorizes it explicitly.
 
+## Delegate mode (you write the message, no Groq)
+
+Delegate mode removes the Groq API from the loop entirely: instead of the CLI
+making 3–4 serial API calls (with queue latency), the CLI hands **you** the
+filled prompts and **you** — already running — produce the message, then return
+it through `commitcraft ai submit`. This is the fast path for agent-driven
+commits.
+
+**When it's active:** either `[agent] mode = "delegate"` is set in
+`~/.config/CommitCraft/config.toml`, or you pass `--agent` to
+`generate`/`regenerate`/`merge`/`release`. You detect it by the response shape:
+the command prints `"mode": "delegate"` instead of a persisted draft.
+
+**The contract is response-driven** — you don't need to know in advance whether
+delegate mode is on. Run `ai generate` as usual; if the reply is a delegate
+bundle, follow this section. If it's a normal draft, follow steps 6–8 as
+before.
+
+### Commit flow (delegate)
+
+```sh
+# 1. Generate. With delegate config you can omit --agent; with Groq config add it.
+commitcraft ai generate -k "<kp>" -t <TAG> -s <scope>     # or: ... --agent
+#   → prints a bundle: {"mode":"delegate","kind":"commit","inputs":{...},
+#                       "unified":{"system","user"} | "stages":[...],
+#                       "instructions","submit_example"}
+```
+
+2. **Produce the message yourself.** Treat `unified.system` as your system
+   instructions and `unified.user` as the input (it carries TAG / MODULE /
+   DEVELOPER_POINTS / GIT_CHANGES). For `strategy:"staged"`, work through
+   `stages[]` in order (summary → body → title → optional changelog), feeding
+   each stage's output into the next, exactly as the prompts describe. Either
+   way you emit **one** result. If `inputs.changelog_active` is true, the user
+   block includes `CHANGELOG_CONTEXT` — also produce a `changelog_entry` and a
+   one-line `changelog_mention` containing the token `CHANGELOG.md`.
+
+   **The title AND body must be in English** — this is the standing rule, and
+   both the bundle `instructions` and the prompt restate it. Keypoints stay
+   Spanish; the commit is always English.
+
+3. **Submit.** Build the JSON safely with `jq` (avoids newline-escaping
+   pitfalls in multiline bodies) and pipe it to `ai submit`. Copy `tag`,
+   `scope`, `keypoints` verbatim from the bundle's `inputs`:
+
+   ```sh
+   jq -n \
+     --arg tag "ADD" \
+     --arg scope "cli" \
+     --arg title "add agent delegate mode" \
+     --arg body $'Explain the why...\n\n- bullet one\n- bullet two' \
+     '{kind:"commit", tag:$tag, scope:[$scope], keypoints:["..."],
+       title:$title, body:$body}' \
+   | commitcraft ai submit
+   ```
+
+   `ai submit` re-reads the staged diff, composes `final_message`, runs the
+   verifier, and persists the draft. Its response is the **standard envelope**
+   (`id`, `final_message`, …) plus an embedded **`verify`** block.
+
+4. **Read the embedded `verify`.** Because submit already ran the verifier, you
+   usually don't need a separate `ai verify` call. If `verify.has_errors` is
+   true, fix it: either re-submit with corrected `title`/`body`, or
+   `commitcraft ai edit --id <id> …`. Then do the semantic review (step **6b**)
+   as usual.
+
+5. **Continue at step 7** — `promote`, `git commit`, `link-commit` are
+   identical to the Groq path. Nothing downstream of submit changes.
+
+To **regenerate** in delegate mode: `commitcraft ai regenerate --id <id>
+--agent` returns a bundle with `"action":"regenerate"` and the draft's `id`.
+Produce the new message, then submit with that same `id` in the JSON
+(`{kind:"commit", id:<id>, title:…, body:…}`) — it updates the draft in place.
+
+### Merge / release flow (delegate)
+
+```sh
+commitcraft ai merge   --branch <source> --into main --agent     # kind:"release", type MERGE
+commitcraft ai release --version v1.2.3 --agent                  # kind:"release", type RELEASE
+```
+
+The bundle carries `kind:"release"`, the filled release prompt(s), and
+`inputs.commit_list` (the storage-ready serialization). Produce the **English**
+title + body from the prompt, then submit with `kind:"release"`, copying
+`type`/`branch`/`version`/`commit_list` from `inputs`:
+
+```sh
+jq -n --arg title "..." --arg body $'...' --arg cl "$(…copy inputs.commit_list…)" \
+  '{kind:"release", type:"MERGE", branch:"feat/foo", title:$title, body:$body, commit_list:$cl}' \
+| commitcraft ai submit
+```
+
+Then `verify` (from the submit response) / `promote --kind release` / the
+actual `git merge` (or hand release notes to the user) exactly as in the merge
+and release sections above. Pass `--kind release` to every follow-up call.
+
+### Delegate mode notes
+
+- **No Groq, no rate limits.** The `rate_limited` / key-swap path (step 5.5)
+  cannot fire in delegate mode — there is no API call. Skip step 5.5 entirely.
+- **`ai submit` exits 0 on a successful persist** even when `verify` found
+  errors — the draft is saved and recoverable. The quality signal is the
+  `verify` block in the JSON, not the exit code. Always read it.
+- **Multiline bodies:** prefer `jq -n --arg body "$BODY"` or write the JSON to
+  a temp file and `commitcraft ai submit --input-file /tmp/sub.json`. Do not
+  hand-concatenate JSON with embedded newlines.
+- **Strategy:** `single` (one unified prompt) is the default and the best
+  quality/speed trade-off for a capable agent; `staged` (the original
+  per-stage prompts) is available via `--agent-strategy staged` or the config
+  `strategy` key when you want to follow the decomposed pipeline faithfully.
+
 ## What this skill does NOT do
 
 - It does not push.
@@ -801,4 +939,16 @@ commitcraft ai verify --id <id> --kind release
 commitcraft ai edit --id <id> --kind release --body -
 commitcraft ai promote --id <id> --kind release
 commitcraft ai show --id <id> --kind release | jq -r .body
+
+# 10. DELEGATE MODE (no Groq): generate emits a bundle, you write the message, ai submit persists it.
+#     Active when [agent] mode="delegate" in config, or with --agent. Detect via "mode":"delegate".
+commitcraft ai generate -k "..." -t <TAG> -s <scope>  # or add --agent; returns a delegate bundle
+#  → read bundle.unified (or .stages[]); produce ENGLISH title+body, then:
+jq -n --arg t "<title>" --arg b $'<body>' \
+  '{kind:"commit", tag:"<TAG>", scope:["<scope>"], keypoints:["..."], title:$t, body:$b}' \
+| commitcraft ai submit                               # re-reads diff, verifies, persists; response has .verify
+#  → if .verify.has_errors: fix via re-submit or `ai edit --id <id>`, then:
+commitcraft ai promote --id <id>                      # then git commit + link-commit as in steps 5/5.5
+#  regenerate: `ai regenerate --id <id> --agent` → submit with {id:<id>, ...}
+#  merge/release: add --agent → submit with {kind:"release", type:"MERGE|RELEASE", ...}
 ```
