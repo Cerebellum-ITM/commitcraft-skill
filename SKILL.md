@@ -771,10 +771,20 @@ before.
 ```sh
 # 1. Generate. With delegate config you can omit --agent; with Groq config add it.
 commitcraft ai generate -k "<kp>" -t <TAG> -s <scope>     # or: ... --agent
-#   → prints a bundle: {"mode":"delegate","kind":"commit","inputs":{...},
+#   → prints a bundle: {"mode":"delegate","kind":"commit","id":<N>,"inputs":{...},
 #                       "unified":{"system","user"} | "stages":[...],
 #                       "instructions","submit_example"}
+#   The bundle carries a top-level "id": generate already persisted a PENDING
+#   draft (id N). You MUST copy that id into the submit payload (step 3) so the
+#   row is filled in place instead of orphaned + duplicated.
 ```
+
+> **Never `git commit` straight from the bundle.** The bundle is only prompt
+> material — it is *not* a persisted, promoted commit. You must run `ai submit`
+> (with the bundle's `id`) and then `ai promote` before `git commit`. Skipping
+> the handoff leaves the pending draft empty and the history record incomplete.
+> This flow is non-negotiable: a fresh agent handles each commit, so the order
+> lives here, not in session memory.
 
 2. **Produce the message yourself.** Treat `unified.system` as your system
    instructions and `unified.user` as the input (it carries TAG / MODULE /
@@ -791,22 +801,27 @@ commitcraft ai generate -k "<kp>" -t <TAG> -s <scope>     # or: ... --agent
 
 3. **Submit.** Build the JSON safely with `jq` (avoids newline-escaping
    pitfalls in multiline bodies) and pipe it to `ai submit`. Copy `tag`,
-   `scope`, `keypoints` verbatim from the bundle's `inputs`:
+   `scope`, `keypoints` verbatim from the bundle's `inputs`, **and copy the
+   bundle's top-level `id`** into the payload so `submit` fills the pending
+   draft in place instead of creating a duplicate:
 
    ```sh
    jq -n \
+     --argjson id <BUNDLE_ID> \
      --arg tag "ADD" \
      --arg scope "cli" \
      --arg title "add agent delegate mode" \
      --arg body $'Explain the why...\n\n- bullet one\n- bullet two' \
-     '{kind:"commit", tag:$tag, scope:[$scope], keypoints:["..."],
+     '{kind:"commit", id:$id, tag:$tag, scope:[$scope], keypoints:["..."],
        title:$title, body:$body}' \
    | commitcraft ai submit
    ```
 
-   `ai submit` re-reads the staged diff, composes `final_message`, runs the
-   verifier, and persists the draft. Its response is the **standard envelope**
-   (`id`, `final_message`, …) plus an embedded **`verify`** block.
+   `ai submit` updates the pending draft (id from the bundle), composes
+   `final_message`, and runs the verifier. Its response is the **standard
+   envelope** (`id`, `final_message`, …) plus an embedded **`verify`** block.
+   (If the bundle somehow lacks an `id`, omit it and submit creates a fresh
+   draft snapshotting the current staged diff.)
 
 4. **Read the embedded `verify`.** Because submit already ran the verifier, you
    usually don't need a separate `ai verify` call. If `verify.has_errors` is
