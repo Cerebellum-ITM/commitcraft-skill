@@ -4,11 +4,9 @@ A [Claude Code skill](https://docs.claude.com/en/docs/claude-code/skills) that d
 headless mode to produce structured `[TAG] scope: title` commit messages
 from the changes the assistant just made in a session.
 
-The skill stages the relevant files, picks a tag and scope, generates a
-message via the multi-stage AI pipeline, reviews the output for AI
-residue, regenerates the broken stage if necessary, and finally promotes
-the draft to `completed`. The user runs `git commit` themselves with the
-printed message.
+The skill stages the relevant files, picks a tag and scope, writes the
+message (or has the Groq pipeline write it), verifies it, promotes the
+draft to `completed`, and creates the git commit. It never pushes.
 
 ## Installation
 
@@ -69,34 +67,41 @@ generate the commit message for this work
 
 ## What the skill does
 
-See [`SKILL.md`](./SKILL.md) for the full workflow. Short version:
+See [`SKILL.md`](./SKILL.md) for the full workflow. Short version, in
+the default **delegate mode** (`[agent] mode = "delegate"` in
+`~/.config/CommitCraft/config.toml`):
 
 1. Stages the files the assistant just modified (`git add` by path,
    never `-A`).
-2. Reads `commitcraft ai list-tags`, picks a tag.
-3. Deduces the scope from the staged paths.
-4. Composes 3–6 concise keypoints in Spanish from the work done in the
+2. Reads `commitcraft ai list-tags`, picks a tag; deduces the scope from
+   the staged paths.
+3. Composes 3–6 concise keypoints in Spanish from the work done in the
    session.
-5. Runs `commitcraft ai generate`.
-6. Reviews the result; if the title/body/changelog has AI residue,
-   re-runs that stage with `commitcraft ai regenerate --stage …` (max 2
-   retries).
-7. Promotes the draft (`commitcraft ai promote --id …`).
-8. Prints the `final_message` and a `git commit` invocation for the
-   user to run.
+4. Runs `commitcraft ai generate`, which returns a prompt bundle instead
+   of calling Groq.
+5. Writes the English title and body itself, following the bundle's
+   prompt, and persists them with `commitcraft ai submit`.
+6. Reads the embedded `verify` report and patches with `ai edit` if
+   needed.
+7. Promotes the draft, runs `git commit`, and links the draft to the
+   new hash with `ai link-commit`.
+
+With `mode = "groq"` the same flow runs the Groq pipeline instead of
+step 5; that path is documented as an appendix in `SKILL.md`.
 
 ## What it does NOT do
 
-- It never runs `git commit` — that's intentional. The user owns the
-  final commit step.
 - It never pushes.
+- It never merges, tags, or publishes a GitHub release on its own
+  initiative.
 - It doesn't reword existing commits (use the CommitCraft TUI's
   `-w <hash>` flow for that).
 
 ## Required CommitCraft version
 
-`v0.36.0` or newer (introduces `ai list-tags` and `ai regenerate
---stage`). Earlier versions only support the full-pipeline regenerate.
+`v0.70.0` or newer: delegate bundles carry the pending draft `id`, and
+`ai verify` reports the style rules the skill relies on
+(`title_text_too_long`, `title_restates_tag_verb`, `body_line_too_long`).
 
 ## License
 
