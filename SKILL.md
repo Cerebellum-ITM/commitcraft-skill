@@ -67,7 +67,7 @@ executes the whole pipeline, and returns only the commit hash + title.
 ```
 Agent(
   subagent_type: "general-purpose",
-  model: "sonnet",
+  model: "sonnet",  # alias for the latest Sonnet
   description: "Commit current changes",
   prompt: """
     Run the commitcraft skill end-to-end for the staged tree.
@@ -93,7 +93,8 @@ Agent(
 ```
 
 **Model choice matters in delegate mode.** The sub-agent is the author of
-the commit message, not a script runner. Use **Sonnet** as the floor; Haiku
+the commit message, not a script runner. Use **the latest Sonnet** (the
+`"sonnet"` alias, never a pinned version) as the floor; Haiku
 produces noticeably different bodies (mechanism dumps, bullet-only bodies)
 from the same prompt, and mixing authors is the main source of
 inconsistency across a repo's history. Only in Groq mode, where the model
