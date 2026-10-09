@@ -382,6 +382,9 @@ Rules and what to do:
 | `title_restates_tag_verb`     | warning  | Rewrite the title; this one is never justified.       |
 | `body_line_too_long` (> 72)   | warning  | Re-wrap the body and re-submit or `ai edit --body -`. |
 | `generic_title`               | warning  | Add specifics.                                        |
+| `body_too_long` (> 15 lines)  | warning  | Cut to the reason and the decisions; drop the implementation walk-through. |
+| `planning_reference` (`R45`, "unit 8") | warning | Replace with what it means. Keep only when the commit touches nothing but planning docs. |
+| `session_narrative`           | warning  | Remove it; a commit records the change, not how it was made or tested. |
 | `title_too_long_soft` (> 72 whole line), `title_format_missing_scope`, `empty_body`, `duplicate_line_in_body` | warning | Judgement call. |
 
 Fix with a re-submit (same `id`, corrected `title`/`body`) or with
