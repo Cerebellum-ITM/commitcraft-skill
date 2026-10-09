@@ -57,6 +57,21 @@ a different structure because a change "feels" like it deserves bullets, or
 a longer title, or a note about how it was tested. Step 6 summarizes the
 rules that are violated most often; the prompt is the authority.
 
+### The why travels in the keypoints, or it is lost
+
+A commit message records **why** the change was made; the diff already
+shows what changed. The writer of the message (usually a sub-agent) sees
+only the diff and the keypoints. It was not in the conversation, so it
+cannot know the problem, the business rule or the trade-off unless the
+keypoints say so. When they don't, it fills the gap with a walk through the
+implementation, or with a fake reason ("X had no way to do Y").
+
+So the agent that did the work owes the writer two things (step 4): the
+reason, stated so that someone outside the conversation understands it, and
+the decisions with their reasons. The conversation's private vocabulary
+(decision ids, plan units, nicknames for things) must be translated before
+it leaves, because the writer will copy it literally.
+
 ### Preferred invocation: delegate to a sub-agent
 
 When the parent agent is the one that just produced the code (the normal
@@ -72,25 +87,34 @@ Agent(
   prompt: """
     Run the commitcraft skill end-to-end for the staged tree.
 
-    Keypoints (use verbatim, do not paraphrase):
-    - <keypoint 1>
-    - <keypoint 2>
-    - ...
+    Keypoints (pass to `ai generate` verbatim, do not paraphrase):
+    - Por qué: <problem / need / rule, understandable outside this chat>
+    - Decisión: <choice> porque <reason>
+    - <optional fact a reader must know>
 
     Functionality covered by this commit: <one line>
     Files in scope (already staged): <list>
 
     If `ai generate` returns a delegate bundle, YOU write the English
     title and body following the bundle's `unified.system` prompt
-    exactly, then `ai submit` with the bundle's `id`. Read the `verify`
-    block; fix warnings that the prompt forbids (line > 72, title > 50,
-    title restating the tag verb) with `ai edit` or a re-submit. Cap 2
-    retries.
+    exactly, then `ai submit` with the bundle's `id`. The body leads with
+    the `Por qué`; it does not walk through the implementation. Read the
+    `verify` block; fix warnings that the prompt forbids (line > 72,
+    title > 50, title restating the tag verb) with `ai edit` or a
+    re-submit. Before promoting, re-read the message as someone who never
+    saw this conversation: if a term, id or reference would not make
+    sense to them, fix it. Cap 2 retries.
+
+    If the keypoints carry no `Por qué`, do not invent one: stop before
+    `ai generate` and report back `MISSING_WHY`.
 
     Report back ONLY: <commit_hash> <title line of final_message>.
   """
 )
 ```
+
+If the sub-agent answers `MISSING_WHY`, write the `Por qué` keypoint from
+your session memory and delegate again. Never let it guess the reason.
 
 **Model choice matters in delegate mode.** The sub-agent is the author of
 the commit message, not a script runner. Use **the latest Sonnet** (the
@@ -181,38 +205,73 @@ of Odoo module names. Never a path with slashes.
 
 ### 4. Build the keypoints
 
-The keypoints carry the **intent** behind the diff, the one thing the diff
-cannot show. They are the bridge between your session memory and the
-message.
+The keypoints carry the **reason** behind the diff, the one thing the diff
+cannot show. They are the only bridge between your session memory and the
+writer of the message, who was not in the conversation.
 
-1. **Spanish, concise.** Short noun phrases or single sentences, not
-   paragraphs. The keypoints are Spanish; the commit is always English.
-   Never "fix" an English commit back to Spanish because the keypoints were
-   Spanish.
-2. **Each keypoint names something concrete**: a symbol, filename, flag,
-   decision, or version bump.
-3. **The why, not the what.** The diff shows what changed; keypoints add the
-   reasoning, the trade-off, the link between pieces.
-4. **3–6 keypoints.**
-5. **No session narrative.** Do not put "suite de 41 tests en verde" or
-   "verificado contra habitta_dev" in a keypoint: the prompt forbids it in
-   the body, and a keypoint that says it invites the model to leak it. If a
-   verification detail matters to the reader of `git log`, it is a design
-   fact ("el cron es noupdate, por eso el .po no lo sobreescribe"), not a
-   test report.
+Structure, in this order:
+
+1. **`Por qué: …` (required, exactly one).** The problem, need or rule that
+   made the change necessary, as a teammate outside this conversation
+   would understand it: the symptom and who suffers it (fix), the need and
+   who has it (feature), the constraint (business, legal, compatibility),
+   the cost removed (refactor). Not "no existía X" or "faltaba X": say who
+   needed X and what they had to do without it.
+2. **`Decisión: … porque …` (0–2).** Non-obvious choices and their reason:
+   X instead of Y, what deliberately does not change, what a caller or a
+   database must know. Only the ones a future reader would wonder about.
+3. **Plain facts (0–2).** Something the reader must know and the diff does
+   not make obvious (compatibility, migration, a version bump with its
+   kind).
+
+Rules:
+
+- **Spanish, one idea per keypoint, ≤ ~120 characters.** At most 5 in
+  total. The keypoints are Spanish; the commit is always English. Never
+  "fix" an English commit back to Spanish because the keypoints were
+  Spanish.
+- **No implementation list.** Do not enumerate files, functions, fields,
+  components or buttons; the diff carries them and the writer reads it.
+  Name a symbol only when a decision is about it.
+- **Outsider test: translate the conversation's private vocabulary.** The
+  writer copies terms literally. Never pass decision ids (`R31`), plan unit
+  numbers ("unidad 8"), sections of planning docs (`spec.md §3.1`), names
+  coined in the session for things the code or UI calls otherwise, the
+  test machine, or "el usuario" meaning the person in this chat. Write
+  what each one means instead.
+- **No session narrative.** No "suite de 41 tests en verde", "verificado
+  contra habitta_dev", "medido en la Mac de pruebas". If a verification
+  detail matters to the reader of `git log`, it is a design fact ("el cron
+  es noupdate, por eso el .po no lo sobreescribe"), not a test report.
 
 Good:
 
-- `"Nuevo subcomando ai promote para marcar drafts como completed"`
-- `"Bump v0.35.1 -> v0.36.0 (minor: subcomando user-visible)"`
-- `"add-tag valida contra list-addable-tags para evitar tags inventados"`
+- `"Por qué: el contrato quedaba firmado por el cliente con una firma interna, porque se distinguía a los firmantes por correo y el correo cambió"`
+- `"Decisión: distinguir por la etapa de la invitación, que no cambia"`
+- `"Bump v0.35.1 -> v0.36.0 (minor: subcomando visible)"`
 
 Bad:
 
-- `"Cambios en el CLI"` (says nothing)
+- `"Comandos Tauri regimes y set_regimes en profile.rs"` (what, not why;
+  the diff already says it)
+- `"Por qué: no había forma de exportar"` (absence, not a reason: who
+  needed to export, and why)
+- `"R57: seguimiento de cancelaciones (unidad 31)"` (private ids)
 - `"Se agregó un nuevo archivo internal/cli/ai/promote.go que implementa…"`
-  (paragraph, not keypoint)
+  (paragraph, and mechanism)
 - `"7 tests nuevos, suite de 41 en verde"` (session narrative)
+
+If you cannot state the `Por qué` in one sentence, you are probably
+committing two things at once; split the commit.
+
+#### Context-store and planning changes
+
+Changes to a context store or planning docs (`STATE.md`, specs, plans,
+decision logs) are not features. When they describe the functionality being
+committed, stage them **with** that commit instead of making a separate
+`[DOC] context` commit that retells it. Changes that only record the
+session's progress go in one commit at session close (`/ctx close`), with a
+short message: title plus at most two lines.
 
 ### 5. Generate
 
@@ -249,14 +308,22 @@ Follow the prompt in full. These are the rules that real drafts break most
 often; they are restated here because the verifier now measures them:
 
 - **English**, title and body, always.
-- **Title text ≤ 50 characters**, imperative, lowercase, no period, and it
-  **does not open with the tag's verb**: `[ADD] x: add …`, `[FIX] x: fix …`,
-  `[REM] x: remove …`, `[DOC] x: document …` are all wrong. Name the outcome,
-  not the mechanism.
+- **The body is the why.** First paragraph: the problem, need or rule from
+  the `Por qué` keypoint, as behavior someone notices. Then the change in
+  one or two sentences, then decisions with their reasons. Never a walk
+  through files, functions or UI elements; name a symbol only when a
+  decision needs it.
+- **Short.** Self-explanatory change: one or two sentences. Typical: 3–8
+  lines. Never more than 15. Plain words, sentences of about 25 words at
+  most.
+- **Outsider test.** No decision ids, plan units, planning-doc sections,
+  session nicknames, test machine, or "the user" meaning the requester.
+- **Title text ≤ 50 characters**, imperative with a concrete verb (never a
+  noun phrase), literal enough to understand from `git log --oneline`,
+  lowercase, no period, and it **does not open with the tag's verb**:
+  `[ADD] x: add …`, `[FIX] x: fix …`, `[REM] x: remove …`, `[DOC] x:
+  document …` are all wrong.
 - **Body hard-wrapped at 72 columns.** Count.
-- **Body leads with behavior as prose**: what was wrong or missing, what
-  happens now, what the user notices. Never a bullet list as the whole body;
-  bullets (`- ` at column 0) only for three or more parallel items.
 - **No session narrative**: no test counts, no "verified against
   <environment>", no tools run, no "the assistant". A version bump is one
   short final line.
@@ -333,6 +400,12 @@ Read `final_message` once more for:
   than the keypoints asked for.
 - **Mechanism dump**: a body that lists what each function does instead of
   what changed for the user.
+- **Missing or fake why**: cover the first paragraph and ask "why was this
+  needed?". If the answer is only "because X did not exist", or the reason
+  shows up last after the implementation, rewrite it.
+- **Conversation leaks**: read it as a teammate who never saw the session.
+  Any id, unit number, nickname or reference that only makes sense with the
+  conversation open gets replaced by what it means, or removed.
 
 Cap at **2** correction rounds. If it's still wrong, stop and surface the
 latest `final_message` to the user with a one-line note.
@@ -384,7 +457,7 @@ Report using **exactly** this two-line format, nothing else:
 Example:
 
 ```
-- Commit: f9e2d73 [DOC] contract: document blog composition and lifecycle
+- Commit: f9e2d73 [DOC] contract: explain how a blog is composed and evolves
 - Resumen: Documenta cómo se compone un blog y su ciclo de vida en el contrato.
 ```
 
@@ -557,7 +630,7 @@ commitcraft ai add-tag --tag <TAG>
 git diff --cached --name-only
 
 # 2. generate (delegate config → bundle with id; Groq config → finished draft)
-commitcraft ai generate -k "..." -k "..." -t <TAG> -s <scope>
+commitcraft ai generate -k "Por qué: ..." -k "Decisión: ... porque ..." -t <TAG> -s <scope>
 
 # 3. (delegate) write ENGLISH title+body per bundle.unified.system, then submit with the id
 jq -n --argjson id <ID> --arg title "..." --arg body "$BODY" \
